@@ -18,19 +18,19 @@ var (
 )
 
 func cpuCfsPeriod() bool {
-	return SysInfo.CPUCfsPeriod
+	return testEnv.DaemonInfo.CPUCfsPeriod
 }
 
 func cpuCfsQuota() bool {
-	return SysInfo.CPUCfsQuota
+	return testEnv.DaemonInfo.CPUCfsQuota
 }
 
 func cpuShare() bool {
-	return SysInfo.CPUShares
+	return testEnv.DaemonInfo.CPUShares
 }
 
 func oomControl() bool {
-	return SysInfo.OomKillDisable
+	return testEnv.DaemonInfo.OomKillDisable
 }
 
 func pidsLimit() bool {
@@ -38,11 +38,22 @@ func pidsLimit() bool {
 }
 
 func kernelMemorySupport() bool {
-	return SysInfo.KernelMemory
+	// TODO remove this once kmem support in RHEL kernels is fixed. See https://github.com/opencontainers/runc/pull/1921
+	daemonV, err := kernel.ParseRelease(testEnv.DaemonInfo.KernelVersion)
+	if err != nil {
+		return false
+	}
+	requiredV := kernel.VersionInfo{Kernel: 3, Major: 10}
+	if kernel.CompareKernelVersion(*daemonV, requiredV) < 1 {
+		// On Kernel 3.10 and under, don't consider kernel memory to be supported,
+		// even if the kernel (and thus the daemon) reports it as being supported
+		return false
+	}
+	return testEnv.DaemonInfo.KernelMemory
 }
 
 func memoryLimitSupport() bool {
-	return SysInfo.MemoryLimit
+	return testEnv.DaemonInfo.MemoryLimit
 }
 
 func memoryReservationSupport() bool {
@@ -50,19 +61,19 @@ func memoryReservationSupport() bool {
 }
 
 func swapMemorySupport() bool {
-	return SysInfo.SwapLimit
+	return testEnv.DaemonInfo.SwapLimit
 }
 
 func memorySwappinessSupport() bool {
-	return SysInfo.MemorySwappiness
+	return testEnv.IsLocalDaemon() && SysInfo.MemorySwappiness
 }
 
 func blkioWeight() bool {
-	return SysInfo.BlkioWeight
+	return testEnv.IsLocalDaemon() && SysInfo.BlkioWeight
 }
 
 func cgroupCpuset() bool {
-	return SysInfo.Cpuset
+	return testEnv.DaemonInfo.CPUSet
 }
 
 func seccompEnabled() bool {
@@ -101,7 +112,7 @@ func overlay2Supported() bool {
 		return false
 	}
 
-	daemonV, err := kernel.ParseRelease(daemonKernelVersion)
+	daemonV, err := kernel.ParseRelease(testEnv.DaemonInfo.KernelVersion)
 	if err != nil {
 		return false
 	}
@@ -111,5 +122,7 @@ func overlay2Supported() bool {
 }
 
 func init() {
-	SysInfo = sysinfo.New(true)
+	if testEnv.IsLocalDaemon() {
+		SysInfo = sysinfo.New(true)
+	}
 }

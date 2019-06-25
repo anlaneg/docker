@@ -3,7 +3,6 @@ package ipvlan
 import (
 	"fmt"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/docker/docker/pkg/parsers/kernel"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/libnetwork/driverapi"
@@ -12,6 +11,7 @@ import (
 	"github.com/docker/libnetwork/options"
 	"github.com/docker/libnetwork/osl"
 	"github.com/docker/libnetwork/types"
+	"github.com/sirupsen/logrus"
 )
 
 // CreateNetwork the network for the specified driver type
@@ -68,7 +68,7 @@ func (d *driver) CreateNetwork(nid string, option map[string]interface{}, nInfo 
 	err = d.storeUpdate(config)
 	if err != nil {
 		d.deleteNetwork(config.ID)
-		logrus.Debugf("encoutered an error rolling back a network create for %s : %v", config.ID, err)
+		logrus.Debugf("encountered an error rolling back a network create for %s : %v", config.ID, err)
 		return err
 	}
 
@@ -92,7 +92,7 @@ func (d *driver) createNetwork(config *configuration) error {
 				return err
 			}
 			config.CreatedSlaveLink = true
-			// notify the user in logs they have limited comunicatins
+			// notify the user in logs they have limited communications
 			if config.Parent == getDummyName(stringid.TruncateID(config.ID)) {
 				logrus.Debugf("Empty -o parent= and --internal flags limit communications to other containers inside of network: %s",
 					config.Parent)
@@ -150,11 +150,13 @@ func (d *driver) DeleteNetwork(nid string) error {
 	}
 	for _, ep := range n.endpoints {
 		if link, err := ns.NlHandle().LinkByName(ep.srcName); err == nil {
-			ns.NlHandle().LinkDel(link)
+			if err := ns.NlHandle().LinkDel(link); err != nil {
+				logrus.WithError(err).Warnf("Failed to delete interface (%s)'s link on endpoint (%s) delete", ep.srcName, ep.id)
+			}
 		}
 
 		if err := d.storeDelete(ep); err != nil {
-			logrus.Warnf("Failed to remove ipvlan endpoint %s from store: %v", ep.id[0:7], err)
+			logrus.Warnf("Failed to remove ipvlan endpoint %.7s from store: %v", ep.id, err)
 		}
 	}
 	// delete the *network
