@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,15 +20,17 @@ import (
 	"github.com/docker/docker/oci"
 	"github.com/docker/docker/oci/caps"
 	"github.com/docker/docker/pkg/idtools"
-	"github.com/docker/docker/pkg/mount"
+	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/rootless/specconv"
 	volumemounts "github.com/docker/docker/volume/mounts"
+	"github.com/moby/sys/mount"
+	"github.com/moby/sys/mountinfo"
 	"github.com/opencontainers/runc/libcontainer/apparmor"
 	"github.com/opencontainers/runc/libcontainer/cgroups"
 	"github.com/opencontainers/runc/libcontainer/devices"
 	rsystem "github.com/opencontainers/runc/libcontainer/system"
 	"github.com/opencontainers/runc/libcontainer/user"
-	"github.com/opencontainers/runtime-spec/specs-go"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -66,13 +69,14 @@ func WithLibnetwork(daemon *Daemon, c *container.Container) coci.SpecOpts {
 		for _, ns := range s.Linux.Namespaces {
 			if ns.Type == "network" && ns.Path == "" && !c.Config.NetworkDisabled {
 				target := filepath.Join("/proc", strconv.Itoa(os.Getpid()), "exe")
+				shortNetCtlrID := stringid.TruncateID(daemon.netController.ID())
 				s.Hooks.Prestart = append(s.Hooks.Prestart, specs.Hook{
 					Path: target,
 					Args: []string{
 						"libnetwork-setkey",
 						"-exec-root=" + daemon.configStore.GetExecRoot(),
 						c.ID,
-						daemon.netController.ID(),
+						shortNetCtlrID,
 					},
 				})
 			}
@@ -82,8 +86,26 @@ func WithLibnetwork(daemon *Daemon, c *container.Container) coci.SpecOpts {
 }
 
 // WithRootless sets the spec to the rootless configuration
-func WithRootless(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
-	return specconv.ToRootless(s)
+func WithRootless(daemon *Daemon) coci.SpecOpts {
+	return func(_ context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
+		var v2Controllers []string
+		if daemon.getCgroupDriver() == cgroupSystemdDriver {
+			if !cgroups.IsCgroup2UnifiedMode() {
+				return errors.New("rootless systemd driver doesn't support cgroup v1")
+			}
+			rootlesskitParentEUID := os.Getenv("ROOTLESSKIT_PARENT_EUID")
+			if rootlesskitParentEUID == "" {
+				return errors.New("$ROOTLESSKIT_PARENT_EUID is not set (requires RootlessKit v0.8.0)")
+			}
+			controllersPath := fmt.Sprintf("/sys/fs/cgroup/user.slice/user-%s.slice/cgroup.controllers", rootlesskitParentEUID)
+			controllersFile, err := ioutil.ReadFile(controllersPath)
+			if err != nil {
+				return err
+			}
+			v2Controllers = strings.Fields(string(controllersFile))
+		}
+		return specconv.ToRootless(s, v2Controllers)
+	}
 }
 
 // WithOOMScore sets the oom score
@@ -111,12 +133,12 @@ func WithApparmor(c *container.Container) coci.SpecOpts {
 			if c.AppArmorProfile != "" {
 				appArmorProfile = c.AppArmorProfile
 			} else if c.HostConfig.Privileged {
-				appArmorProfile = "unconfined"
+				appArmorProfile = unconfinedAppArmorProfile
 			} else {
-				appArmorProfile = "docker-default"
+				appArmorProfile = defaultApparmorProfile
 			}
 
-			if appArmorProfile == "docker-default" {
+			if appArmorProfile == defaultApparmorProfile {
 				// Unattended upgrades and other fun services can unload AppArmor
 				// profiles inadvertently. Since we cannot store our profile in
 				// /etc/apparmor.d, nor can we practically add other ways of
@@ -137,7 +159,7 @@ func WithApparmor(c *container.Container) coci.SpecOpts {
 func WithCapabilities(c *container.Container) coci.SpecOpts {
 	return func(ctx context.Context, _ coci.Client, _ *containers.Container, s *coci.Spec) error {
 		capabilities, err := caps.TweakCapabilities(
-			oci.DefaultCapabilities(),
+			caps.DefaultCapabilities(),
 			c.HostConfig.CapAdd,
 			c.HostConfig.CapDrop,
 			c.HostConfig.Capabilities,
@@ -314,7 +336,9 @@ func WithNamespaces(daemon *Daemon, c *container.Container) coci.SpecOpts {
 				return fmt.Errorf("invalid cgroup namespace mode: %v", cgroupNsMode)
 			}
 
-			if cgroupNsMode.IsPrivate() && !c.HostConfig.Privileged {
+			// for cgroup v2: unshare cgroupns even for privileged containers
+			// https://github.com/containers/libpod/pull/4374#issuecomment-549776387
+			if cgroupNsMode.IsPrivate() && (cgroups.IsCgroup2UnifiedMode() || !c.HostConfig.Privileged) {
 				nsCgroup := specs.LinuxNamespace{Type: "cgroup"}
 				setNamespace(s, nsCgroup)
 			}
@@ -345,7 +369,7 @@ func getSourceMount(source string) (string, string, error) {
 		return "", "", err
 	}
 
-	mi, err := mount.GetMounts(mount.ParentsFilter(sourcePath))
+	mi, err := mountinfo.GetMounts(mountinfo.ParentsFilter(sourcePath))
 	if err != nil {
 		return "", "", err
 	}
@@ -756,6 +780,9 @@ func WithCgroups(daemon *Daemon, c *container.Container) coci.SpecOpts {
 		useSystemd := UsingSystemd(daemon.configStore)
 		if useSystemd {
 			parent = "system.slice"
+			if daemon.configStore.Rootless {
+				parent = "user.slice"
+			}
 		}
 
 		if c.HostConfig.CgroupParent != "" {
@@ -803,6 +830,7 @@ func WithDevices(daemon *Daemon, c *container.Container) coci.SpecOpts {
 		// Build lists of devices allowed and created within the container.
 		var devs []specs.LinuxDevice
 		devPermissions := s.Linux.Resources.Devices
+
 		if c.HostConfig.Privileged && !rsystem.RunningInUserNS() {
 			hostDevices, err := devices.HostDevices()
 			if err != nil {
@@ -811,6 +839,25 @@ func WithDevices(daemon *Daemon, c *container.Container) coci.SpecOpts {
 			for _, d := range hostDevices {
 				devs = append(devs, oci.Device(d))
 			}
+
+			// adding device mappings in privileged containers
+			for _, deviceMapping := range c.HostConfig.Devices {
+				// issue a warning that custom cgroup permissions are ignored in privileged mode
+				if deviceMapping.CgroupPermissions != "rwm" {
+					logrus.WithField("container", c.ID).Warnf("custom %s permissions for device %s are ignored in privileged mode", deviceMapping.CgroupPermissions, deviceMapping.PathOnHost)
+				}
+				// issue a warning that the device path already exists via /dev mounting in privileged mode
+				if deviceMapping.PathOnHost == deviceMapping.PathInContainer {
+					logrus.WithField("container", c.ID).Warnf("path in container %s already exists in privileged mode", deviceMapping.PathInContainer)
+					continue
+				}
+				d, _, err := oci.DevicesFromPath(deviceMapping.PathOnHost, deviceMapping.PathInContainer, "rwm")
+				if err != nil {
+					return err
+				}
+				devs = append(devs, d...)
+			}
+
 			devPermissions = []specs.LinuxDeviceCgroup{
 				{
 					Allow:  true,
@@ -961,7 +1008,7 @@ func (daemon *Daemon) createSpec(c *container.Container) (retSpec *specs.Spec, e
 		opts = append(opts, coci.WithReadonlyPaths(c.HostConfig.ReadonlyPaths))
 	}
 	if daemon.configStore.Rootless {
-		opts = append(opts, WithRootless)
+		opts = append(opts, WithRootless(daemon))
 	}
 	return &s, coci.ApplyOpts(context.Background(), nil, &containers.Container{
 		ID: c.ID,

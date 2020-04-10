@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/platforms"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/backend"
@@ -75,6 +74,7 @@ type Opt struct {
 	BuilderConfig       config.BuilderConfig
 	Rootless            bool
 	IdentityMapping     *idtools.IdentityMapping
+	DNSConfig           config.DNSConfig
 }
 
 // Builder can build using BuildKit backend
@@ -89,6 +89,10 @@ type Builder struct {
 // New creates a new builder
 func New(opt Opt) (*Builder, error) {
 	reqHandler := newReqBodyHandler(tracing.DefaultTransport)
+
+	if opt.IdentityMapping != nil && opt.IdentityMapping.Empty() {
+		opt.IdentityMapping = nil
+	}
 
 	c, err := newController(reqHandler, opt)
 	if err != nil {
@@ -236,7 +240,9 @@ func (b *Builder) Build(ctx context.Context, opt backend.BuildConfig) (*builder.
 		}
 
 		defer func() {
+			b.mu.Lock()
 			delete(b.jobs, buildID)
+			b.mu.Unlock()
 		}()
 	}
 
@@ -461,14 +467,6 @@ func (sp *pruneProxy) SendMsg(m interface{}) error {
 		sp.ch <- sr
 	}
 	return nil
-}
-
-type contentStoreNoLabels struct {
-	content.Store
-}
-
-func (c *contentStoreNoLabels) Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error) {
-	return content.Info{}, nil
 }
 
 type wrapRC struct {

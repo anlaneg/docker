@@ -133,9 +133,6 @@ func DirCopy(srcDir, dstDir string, copyMode Mode, copyXattrs bool) error {
 		}
 
 		dstPath := filepath.Join(dstDir, relPath)
-		if err != nil {
-			return err
-		}
 
 		stat, ok := f.Sys().(*syscall.Stat_t)
 		if !ok {
@@ -146,7 +143,8 @@ func DirCopy(srcDir, dstDir string, copyMode Mode, copyXattrs bool) error {
 
 		switch mode := f.Mode(); {
 		case mode.IsRegular():
-			id := fileID{dev: stat.Dev, ino: stat.Ino}
+			// the type is 32bit on mips
+			id := fileID{dev: uint64(stat.Dev), ino: stat.Ino} // nolint: unconvert
 			if copyMode == Hardlink {
 				isHardlink = true
 				if err2 := os.Link(srcPath, dstPath); err2 != nil {

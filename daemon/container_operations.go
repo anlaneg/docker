@@ -115,6 +115,16 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container) ([]lib
 			return nil, err
 		}
 		parts := strings.SplitN(extraHost, ":", 2)
+		// If the IP Address is a string called "host-gateway", replace this
+		// value with the IP address stored in the daemon level HostGatewayIP
+		// config variable
+		if parts[1] == network.HostGatewayName {
+			gateway := daemon.configStore.HostGatewayIP.String()
+			if gateway == "" {
+				return nil, fmt.Errorf("unable to derive the IP value for host-gateway")
+			}
+			parts[1] = gateway
+		}
 		sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost(parts[0], parts[1]))
 	}
 
@@ -200,7 +210,14 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container) ([]lib
 		if alias != child.Name[1:] {
 			aliasList = aliasList + " " + child.Name[1:]
 		}
-		sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost(aliasList, child.NetworkSettings.Networks[defaultNetName].IPAddress))
+		ipv4 := child.NetworkSettings.Networks[defaultNetName].IPAddress
+		ipv6 := child.NetworkSettings.Networks[defaultNetName].GlobalIPv6Address
+		if ipv4 != "" {
+			sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost(aliasList, ipv4))
+		}
+		if ipv6 != "" {
+			sboxOptions = append(sboxOptions, libnetwork.OptionExtraHost(aliasList, ipv6))
+		}
 		cEndpointID = child.NetworkSettings.Networks[defaultNetName].EndpointID
 		if cEndpointID != "" {
 			childEndpoints = append(childEndpoints, cEndpointID)
@@ -237,7 +254,10 @@ func (daemon *Daemon) buildSandboxOptions(container *container.Container) ([]lib
 
 func (daemon *Daemon) updateNetworkSettings(container *container.Container, n libnetwork.Network, endpointConfig *networktypes.EndpointSettings) error {
 	if container.NetworkSettings == nil {
-		container.NetworkSettings = &network.Settings{Networks: make(map[string]*network.EndpointSettings)}
+		container.NetworkSettings = &network.Settings{}
+	}
+	if container.NetworkSettings.Networks == nil {
+		container.NetworkSettings.Networks = make(map[string]*network.EndpointSettings)
 	}
 
 	if !container.HostConfig.NetworkMode.IsHost() && containertypes.NetworkMode(n.Type()).IsHost() {
@@ -774,9 +794,8 @@ func (daemon *Daemon) connectToNetwork(container *container.Container, idOrName 
 		EndpointSettings: endpointConfig,
 		IPAMOperational:  operIPAM,
 	}
-	if _, ok := container.NetworkSettings.Networks[n.ID()]; ok {
-		delete(container.NetworkSettings.Networks, n.ID())
-	}
+
+	delete(container.NetworkSettings.Networks, n.ID())
 
 	if err := daemon.updateEndpointNetworkSettings(container, n, ep); err != nil {
 		return err

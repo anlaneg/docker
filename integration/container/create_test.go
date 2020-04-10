@@ -15,12 +15,12 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	ctr "github.com/docker/docker/integration/internal/container"
-	"github.com/docker/docker/internal/test/request"
 	"github.com/docker/docker/oci"
-	"gotest.tools/assert"
-	is "gotest.tools/assert/cmp"
-	"gotest.tools/poll"
-	"gotest.tools/skip"
+	"github.com/docker/docker/testutil/request"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
+	"gotest.tools/v3/poll"
+	"gotest.tools/v3/skip"
 )
 
 func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
@@ -63,6 +63,28 @@ func TestCreateFailsWhenIdentifierDoesNotExist(t *testing.T) {
 			assert.Check(t, errdefs.IsNotFound(err))
 		})
 	}
+}
+
+// TestCreateLinkToNonExistingContainer verifies that linking to a non-existing
+// container returns an "invalid parameter" (400) status, and not the underlying
+// "non exists" (404).
+func TestCreateLinkToNonExistingContainer(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "legacy links are not supported on windows")
+	defer setupTest(t)()
+	c := testEnv.APIClient()
+
+	_, err := c.ContainerCreate(context.Background(),
+		&container.Config{
+			Image: "busybox",
+		},
+		&container.HostConfig{
+			Links: []string{"no-such-container"},
+		},
+		&network.NetworkingConfig{},
+		"",
+	)
+	assert.Check(t, is.ErrorContains(err, "could not get container for no-such-container"))
+	assert.Check(t, errdefs.IsInvalidParameter(err))
 }
 
 func TestCreateWithInvalidEnv(t *testing.T) {
@@ -363,7 +385,6 @@ func TestCreateWithCustomReadonlyPaths(t *testing.T) {
 	ctx := context.Background()
 
 	testCases := []struct {
-		doc           string
 		readonlyPaths []string
 		expected      []string
 	}{
@@ -511,5 +532,52 @@ func TestCreateWithInvalidHealthcheckParams(t *testing.T) {
 			}
 			assert.ErrorContains(t, err, tc.expectedErr)
 		})
+	}
+}
+
+// Make sure that anonymous volumes can be overritten by tmpfs
+// https://github.com/moby/moby/issues/40446
+func TestCreateTmpfsOverrideAnonymousVolume(t *testing.T) {
+	skip.If(t, testEnv.DaemonInfo.OSType == "windows", "windows does not support tmpfs")
+	defer setupTest(t)()
+	client := testEnv.APIClient()
+	ctx := context.Background()
+
+	id := ctr.Create(ctx, t, client,
+		ctr.WithVolume("/foo"),
+		ctr.WithTmpfs("/foo"),
+		ctr.WithVolume("/bar"),
+		ctr.WithTmpfs("/bar:size=999"),
+		ctr.WithCmd("/bin/sh", "-c", "mount | grep '/foo' | grep tmpfs && mount | grep '/bar' | grep tmpfs"),
+	)
+
+	defer func() {
+		err := client.ContainerRemove(ctx, id, types.ContainerRemoveOptions{Force: true})
+		assert.NilError(t, err)
+	}()
+
+	inspect, err := client.ContainerInspect(ctx, id)
+	assert.NilError(t, err)
+	// tmpfs do not currently get added to inspect.Mounts
+	// Normally an anoynmous volume would, except now tmpfs should prevent that.
+	assert.Assert(t, is.Len(inspect.Mounts, 0))
+
+	chWait, chErr := client.ContainerWait(ctx, id, container.WaitConditionNextExit)
+	assert.NilError(t, client.ContainerStart(ctx, id, types.ContainerStartOptions{}))
+
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case <-timeout.C:
+		t.Fatal("timeout waiting for container to exit")
+	case status := <-chWait:
+		var errMsg string
+		if status.Error != nil {
+			errMsg = status.Error.Message
+		}
+		assert.Equal(t, int(status.StatusCode), 0, errMsg)
+	case err := <-chErr:
+		assert.NilError(t, err)
 	}
 }

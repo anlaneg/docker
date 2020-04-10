@@ -12,9 +12,9 @@ import (
 	"github.com/docker/docker/container"
 	"github.com/docker/docker/image"
 	"github.com/google/uuid"
-	"github.com/opencontainers/go-digest"
-	"gotest.tools/assert"
-	is "gotest.tools/assert/cmp"
+	digest "github.com/opencontainers/go-digest"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 var root string

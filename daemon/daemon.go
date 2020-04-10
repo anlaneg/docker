@@ -20,7 +20,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/docker/docker/pkg/fileutils"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/defaults"
@@ -73,7 +75,9 @@ import (
 )
 
 // ContainersNamespace is the name of the namespace used for users containers
-const ContainersNamespace = "moby"
+const (
+	ContainersNamespace = "moby"
+)
 
 var (
 	errSystemNotSupported = errors.New("the Docker daemon is not supported on this platform")
@@ -172,8 +176,9 @@ func (daemon *Daemon) NewResolveOptionsFunc() resolver.ResolveOptionsFunc {
 			if uri, err := url.Parse(v); err == nil {
 				v = uri.Host
 			}
+			plainHTTP := true
 			m[v] = resolver.RegistryConf{
-				PlainHTTP: true,
+				PlainHTTP: &plainHTTP,
 			}
 		}
 		def := docker.ResolverOptions{
@@ -192,12 +197,16 @@ func (daemon *Daemon) NewResolveOptionsFunc() resolver.ResolveOptionsFunc {
 		}
 
 		if len(c.Mirrors) > 0 {
+			// TODO ResolverOptions.Host is deprecated; ResolverOptions.Hosts should be used
 			def.Host = func(string) (string, error) {
 				return c.Mirrors[rand.Intn(len(c.Mirrors))], nil
 			}
 		}
 
-		def.PlainHTTP = c.PlainHTTP
+		// TODO ResolverOptions.PlainHTTP is deprecated; ResolverOptions.Hosts should be used
+		if c.PlainHTTP != nil {
+			def.PlainHTTP = *c.PlainHTTP
+		}
 
 		return def
 	}
@@ -335,7 +344,7 @@ func (daemon *Daemon) restore() error {
 			}
 			if !alive && process != nil {
 				ec, exitedAt, err = process.Delete(context.Background())
-				if err != nil {
+				if err != nil && !errdefs.IsNotFound(err) {
 					logrus.WithError(err).Errorf("Failed to delete container %s from containerd", c.ID)
 					return
 				}
@@ -765,13 +774,13 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	if err != nil {
 		return nil, fmt.Errorf("Unable to get the TempDir under %s: %s", config.Root, err)
 	}
-	realTmp, err := getRealPath(tmp)
+	realTmp, err := fileutils.ReadSymlinkedDirectory(tmp)
 	if err != nil {
 		return nil, fmt.Errorf("Unable to get the full path to the TempDir (%s): %s", tmp, err)
 	}
-	if runtime.GOOS == "windows" {
+	if isWindows {
 		if _, err := os.Stat(realTmp); err != nil && os.IsNotExist(err) {
-			if err := system.MkdirAll(realTmp, 0700, ""); err != nil {
+			if err := system.MkdirAll(realTmp, 0700); err != nil {
 				return nil, fmt.Errorf("Unable to create the TempDir (%s): %s", realTmp, err)
 			}
 		}
@@ -786,6 +795,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		PluginStore: pluginStore,
 		startupDone: make(chan struct{}),
 	}
+
 	// Ensure the daemon is properly shutdown if there is a failure during
 	// initialization
 	defer func() {
@@ -833,15 +843,15 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// Create the directory where we'll store the runtime scripts (i.e. in
 	// order to support runtimeArgs)
 	daemonRuntimes := filepath.Join(config.Root, "runtimes")
-	if err := system.MkdirAll(daemonRuntimes, 0700, ""); err != nil {
+	if err := system.MkdirAll(daemonRuntimes, 0700); err != nil {
 		return nil, err
 	}
 	if err := d.loadRuntimes(); err != nil {
 		return nil, err
 	}
 
-	if runtime.GOOS == "windows" {
-		if err := system.MkdirAll(filepath.Join(config.Root, "credentialspecs"), 0, ""); err != nil {
+	if isWindows {
+		if err := system.MkdirAll(filepath.Join(config.Root, "credentialspecs"), 0); err != nil {
 			return nil, err
 		}
 	}
@@ -854,7 +864,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	// initialization of the layerstore through driver priority order for example.
 	d.graphDrivers = make(map[string]string)
 	layerStores := make(map[string]layer.Store)
-	if runtime.GOOS == "windows" {
+	if isWindows {
 		d.graphDrivers[runtime.GOOS] = "windowsfilter"
 		if system.LCOWSupported() {
 			d.graphDrivers["linux"] = "lcow"
@@ -878,17 +888,40 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	}
 	registerMetricsPluginCallback(d.PluginStore, metricsSockPath)
 
+	backoffConfig := backoff.DefaultConfig
+	backoffConfig.MaxDelay = 3 * time.Second
+	connParams := grpc.ConnectParams{
+		Backoff: backoffConfig,
+	}
 	gopts := []grpc.DialOption{
+		// WithBlock makes sure that the following containerd request
+		// is reliable.
+		//
+		// NOTE: In one edge case with high load pressure, kernel kills
+		// dockerd, containerd and containerd-shims caused by OOM.
+		// When both dockerd and containerd restart, but containerd
+		// will take time to recover all the existing containers. Before
+		// containerd serving, dockerd will failed with gRPC error.
+		// That bad thing is that restore action will still ignore the
+		// any non-NotFound errors and returns running state for
+		// already stopped container. It is unexpected behavior. And
+		// we need to restart dockerd to make sure that anything is OK.
+		//
+		// It is painful. Add WithBlock can prevent the edge case. And
+		// n common case, the containerd will be serving in shortly.
+		// It is not harm to add WithBlock for containerd connection.
+		grpc.WithBlock(),
+
 		grpc.WithInsecure(),
-		grpc.WithBackoffMaxDelay(3 * time.Second),
-		grpc.WithDialer(dialer.Dialer),
+		grpc.WithConnectParams(connParams),
+		grpc.WithContextDialer(dialer.ContextDialer),
 
 		// TODO(stevvooe): We may need to allow configuration of this on the client.
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(defaults.DefaultMaxRecvMsgSize)),
 		grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(defaults.DefaultMaxSendMsgSize)),
 	}
 	if config.ContainerdAddr != "" {
-		d.containerdCli, err = containerd.New(config.ContainerdAddr, containerd.WithDefaultNamespace(ContainersNamespace), containerd.WithDialOpts(gopts), containerd.WithTimeout(60*time.Second))
+		d.containerdCli, err = containerd.New(config.ContainerdAddr, containerd.WithDefaultNamespace(config.ContainerdNamespace), containerd.WithDialOpts(gopts), containerd.WithTimeout(60*time.Second))
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to dial %q", config.ContainerdAddr)
 		}
@@ -900,13 +933,13 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		// Windows is not currently using containerd, keep the
 		// client as nil
 		if config.ContainerdAddr != "" {
-			pluginCli, err = containerd.New(config.ContainerdAddr, containerd.WithDefaultNamespace(pluginexec.PluginNamespace), containerd.WithDialOpts(gopts), containerd.WithTimeout(60*time.Second))
+			pluginCli, err = containerd.New(config.ContainerdAddr, containerd.WithDefaultNamespace(config.ContainerdPluginNamespace), containerd.WithDialOpts(gopts), containerd.WithTimeout(60*time.Second))
 			if err != nil {
 				return nil, errors.Wrapf(err, "failed to dial %q", config.ContainerdAddr)
 			}
 		}
 
-		return pluginexec.New(ctx, getPluginExecRoot(config.Root), pluginCli, m)
+		return pluginexec.New(ctx, getPluginExecRoot(config.Root), pluginCli, config.ContainerdPluginNamespace, m, d.useShimV2())
 	}
 
 	// Plugin system initialization should happen before restore. Do not change order.
@@ -980,7 +1013,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 
 	trustDir := filepath.Join(config.Root, "trust")
 
-	if err := system.MkdirAll(trustDir, 0700, ""); err != nil {
+	if err := system.MkdirAll(trustDir, 0700); err != nil {
 		return nil, err
 	}
 
@@ -1047,6 +1080,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 		LayerStores:               layerStores,
 		MaxConcurrentDownloads:    *config.MaxConcurrentDownloads,
 		MaxConcurrentUploads:      *config.MaxConcurrentUploads,
+		MaxDownloadAttempts:       *config.MaxDownloadAttempts,
 		ReferenceStore:            rs,
 		RegistryService:           registryService,
 		TrustKey:                  trustKey,
@@ -1054,7 +1088,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 
 	go d.execCommandGC()
 
-	d.containerd, err = libcontainerd.NewClient(ctx, d.containerdCli, filepath.Join(config.ExecRoot, "containerd"), ContainersNamespace, d)
+	d.containerd, err = libcontainerd.NewClient(ctx, d.containerdCli, filepath.Join(config.ExecRoot, "containerd"), config.ContainerdNamespace, d, d.useShimV2())
 	if err != nil {
 		return nil, err
 	}
@@ -1064,8 +1098,7 @@ func NewDaemon(ctx context.Context, config *config.Config, pluginStore *plugin.S
 	}
 	close(d.startupDone)
 
-	// FIXME: this method never returns an error
-	info, _ := d.SystemInfo()
+	info := d.SystemInfo()
 
 	engineInfo.WithValues(
 		dockerversion.Version,
@@ -1447,7 +1480,7 @@ func CreateDaemonRoot(config *config.Config) error {
 	if _, err := os.Stat(config.Root); err != nil && os.IsNotExist(err) {
 		realRoot = config.Root
 	} else {
-		realRoot, err = getRealPath(config.Root)
+		realRoot, err = fileutils.ReadSymlinkedDirectory(config.Root)
 		if err != nil {
 			return fmt.Errorf("Unable to get the full path to root (%s): %s", config.Root, err)
 		}

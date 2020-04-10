@@ -12,6 +12,7 @@ import (
 
 	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/frontend/dockerfile/instructions"
+	"github.com/moby/buildkit/solver/pb"
 	"github.com/pkg/errors"
 )
 
@@ -113,7 +114,7 @@ func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*
 		}
 		if mount.ReadOnly {
 			mountOpts = append(mountOpts, llb.Readonly)
-		} else if mount.Type == instructions.MountTypeBind {
+		} else if mount.Type == instructions.MountTypeBind && opt.llbCaps.Supports(pb.CapExecMountBindReadWriteNoOuput) == nil {
 			mountOpts = append(mountOpts, llb.ForceNoOutput)
 		}
 		if mount.Type == instructions.MountTypeCache {
@@ -123,6 +124,9 @@ func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*
 			}
 			if mount.CacheSharing == instructions.MountSharingLocked {
 				sharing = llb.CacheMountLocked
+			}
+			if mount.CacheID == "" {
+				mount.CacheID = path.Clean(mount.Target)
 			}
 			mountOpts = append(mountOpts, llb.AsPersistentCacheDir(opt.cacheIDNamespace+"/"+mount.CacheID, sharing))
 		}
@@ -144,7 +148,9 @@ func dispatchRunMounts(d *dispatchState, c *instructions.RunCommand, sources []*
 
 		out = append(out, llb.AddMount(target, st, mountOpts...))
 
-		d.ctxPaths[path.Join("/", filepath.ToSlash(mount.Source))] = struct{}{}
+		if mount.From == "" {
+			d.ctxPaths[path.Join("/", filepath.ToSlash(mount.Source))] = struct{}{}
+		}
 	}
 	return out, nil
 }

@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	nethttp "net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd/content"
@@ -22,12 +23,12 @@ import (
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/metadata"
 	"github.com/moby/buildkit/client"
+	"github.com/moby/buildkit/client/llb"
 	"github.com/moby/buildkit/executor"
 	"github.com/moby/buildkit/exporter"
 	localexporter "github.com/moby/buildkit/exporter/local"
 	tarexporter "github.com/moby/buildkit/exporter/tar"
 	"github.com/moby/buildkit/frontend"
-	gw "github.com/moby/buildkit/frontend/gateway/client"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
 	"github.com/moby/buildkit/solver"
@@ -37,12 +38,14 @@ import (
 	"github.com/moby/buildkit/source/git"
 	"github.com/moby/buildkit/source/http"
 	"github.com/moby/buildkit/source/local"
+	"github.com/moby/buildkit/util/binfmt_misc"
 	"github.com/moby/buildkit/util/contentutil"
 	"github.com/moby/buildkit/util/progress"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	bolt "go.etcd.io/bbolt"
 )
 
 const labelCreatedAt = "buildkit/createdat"
@@ -137,7 +140,19 @@ func (w *Worker) Labels() map[string]string {
 }
 
 // Platforms returns one or more platforms supported by the image.
-func (w *Worker) Platforms() []ocispec.Platform {
+func (w *Worker) Platforms(noCache bool) []ocispec.Platform {
+	if noCache {
+		pm := make(map[string]struct{}, len(w.Opt.Platforms))
+		for _, p := range w.Opt.Platforms {
+			pm[platforms.Format(p)] = struct{}{}
+		}
+		for _, p := range binfmt_misc.SupportedPlatforms(noCache) {
+			if _, ok := pm[p]; !ok {
+				pp, _ := platforms.Parse(p)
+				w.Opt.Platforms = append(w.Opt.Platforms, pp)
+			}
+		}
+	}
 	if len(w.Opt.Platforms) == 0 {
 		return []ocispec.Platform{platforms.DefaultSpec()}
 	}
@@ -147,6 +162,11 @@ func (w *Worker) Platforms() []ocispec.Platform {
 // GCPolicy returns automatic GC Policy
 func (w *Worker) GCPolicy() []client.PruneInfo {
 	return w.Opt.GCPolicy
+}
+
+// ContentStore returns content store
+func (w *Worker) ContentStore() content.Store {
+	return w.Opt.ContentStore
 }
 
 // LoadRef loads a reference by ID
@@ -176,7 +196,7 @@ func (w *Worker) ResolveOp(v solver.Vertex, s frontend.FrontendLLBBridge, sm *se
 }
 
 // ResolveImageConfig returns image config for an image
-func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, opt gw.ResolveImageConfigOpt, sm *session.Manager) (digest.Digest, []byte, error) {
+func (w *Worker) ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager) (digest.Digest, []byte, error) {
 	// ImageSource is typically source/containerimage
 	resolveImageConfig, ok := w.ImageSource.(resolveImageConfig)
 	if !ok {
@@ -257,6 +277,64 @@ func (w *Worker) GetRemote(ctx context.Context, ref cache.ImmutableRef, createIf
 	}, nil
 }
 
+// PruneCacheMounts removes the current cache snapshots for specified IDs
+func (w *Worker) PruneCacheMounts(ctx context.Context, ids []string) error {
+	mu := ops.CacheMountsLocker()
+	mu.Lock()
+	defer mu.Unlock()
+
+	for _, id := range ids {
+		id = "cache-dir:" + id
+		sis, err := w.MetadataStore.Search(id)
+		if err != nil {
+			return err
+		}
+		for _, si := range sis {
+			for _, k := range si.Indexes() {
+				if k == id || strings.HasPrefix(k, id+":") {
+					if siCached := w.CacheManager.Metadata(si.ID()); siCached != nil {
+						si = siCached
+					}
+					if err := cache.CachePolicyDefault(si); err != nil {
+						return err
+					}
+					si.Queue(func(b *bolt.Bucket) error {
+						return si.SetValue(b, k, nil)
+					})
+					if err := si.Commit(); err != nil {
+						return err
+					}
+					// if ref is unused try to clean it up right away by releasing it
+					if mref, err := w.CacheManager.GetMutable(ctx, si.ID()); err == nil {
+						go mref.Release(context.TODO())
+					}
+					break
+				}
+			}
+		}
+	}
+
+	ops.ClearActiveCacheMounts()
+	return nil
+}
+
+func (w *Worker) getRef(ctx context.Context, diffIDs []layer.DiffID, opts ...cache.RefOption) (cache.ImmutableRef, error) {
+	var parent cache.ImmutableRef
+	if len(diffIDs) > 1 {
+		var err error
+		parent, err = w.getRef(ctx, diffIDs[:len(diffIDs)-1], opts...)
+		if err != nil {
+			return nil, err
+		}
+		defer parent.Release(context.TODO())
+	}
+	return w.CacheManager.GetByBlob(context.TODO(), ocispec.Descriptor{
+		Annotations: map[string]string{
+			"containerd.io/uncompressed": diffIDs[len(diffIDs)-1].String(),
+		},
+	}, parent, opts...)
+}
+
 // FromRemote converts a remote snapshot reference to a local one
 func (w *Worker) FromRemote(ctx context.Context, remote *solver.Remote) (cache.ImmutableRef, error) {
 	rootfs, err := getLayers(ctx, remote.Descriptors)
@@ -279,7 +357,7 @@ func (w *Worker) FromRemote(ctx context.Context, remote *solver.Remote) (cache.I
 
 	defer func() {
 		for _, l := range rootfs {
-			w.ContentStore.Delete(context.TODO(), l.Blob.Digest)
+			w.ContentStore().Delete(context.TODO(), l.Blob.Digest)
 		}
 	}()
 
@@ -305,7 +383,7 @@ func (w *Worker) FromRemote(ctx context.Context, remote *solver.Remote) (cache.I
 		if v, ok := remote.Descriptors[i].Annotations["buildkit/description"]; ok {
 			descr = v
 		}
-		ref, err := w.CacheManager.GetFromSnapshotter(ctx, string(layer.CreateChainID(rootFS.DiffIDs[:i+1])), cache.WithDescription(descr), cache.WithCreationTime(tm))
+		ref, err := w.getRef(ctx, rootFS.DiffIDs[:i+1], cache.WithDescription(descr), cache.WithCreationTime(tm))
 		if err != nil {
 			return nil, err
 		}
@@ -348,12 +426,12 @@ func (ld *layerDescriptor) DiffID() (layer.DiffID, error) {
 
 func (ld *layerDescriptor) Download(ctx context.Context, progressOutput pkgprogress.Output) (io.ReadCloser, int64, error) {
 	done := oneOffProgress(ld.pctx, fmt.Sprintf("pulling %s", ld.desc.Digest))
-	if err := contentutil.Copy(ctx, ld.w.ContentStore, ld.provider, ld.desc); err != nil {
+	if err := contentutil.Copy(ctx, ld.w.ContentStore(), ld.provider, ld.desc); err != nil {
 		return nil, 0, done(err)
 	}
-	done(nil)
+	_ = done(nil)
 
-	ra, err := ld.w.ContentStore.ReaderAt(ctx, ld.desc)
+	ra, err := ld.w.ContentStore().ReaderAt(ctx, ld.desc)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -362,7 +440,7 @@ func (ld *layerDescriptor) Download(ctx context.Context, progressOutput pkgprogr
 }
 
 func (ld *layerDescriptor) Close() {
-	// ld.is.ContentStore.Delete(context.TODO(), ld.desc.Digest)
+	// ld.is.ContentStore().Delete(context.TODO(), ld.desc.Digest)
 }
 
 func (ld *layerDescriptor) Registered(diffID layer.DiffID) {
@@ -400,19 +478,19 @@ func oneOffProgress(ctx context.Context, id string) func(err error) error {
 	st := progress.Status{
 		Started: &now,
 	}
-	pw.Write(id, st)
+	_ = pw.Write(id, st)
 	return func(err error) error {
 		// TODO: set error on status
 		now := time.Now()
 		st.Completed = &now
-		pw.Write(id, st)
-		pw.Close()
+		_ = pw.Write(id, st)
+		_ = pw.Close()
 		return err
 	}
 }
 
 type resolveImageConfig interface {
-	ResolveImageConfig(ctx context.Context, ref string, opt gw.ResolveImageConfigOpt, sm *session.Manager) (digest.Digest, []byte, error)
+	ResolveImageConfig(ctx context.Context, ref string, opt llb.ResolveImageConfigOpt, sm *session.Manager) (digest.Digest, []byte, error)
 }
 
 type emptyProvider struct {

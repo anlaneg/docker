@@ -45,6 +45,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 
@@ -58,16 +59,17 @@ import (
 	swarmnode "github.com/docker/swarmkit/node"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
 )
 
-const swarmDirName = "swarm"
-const controlSocket = "control.sock"
-const swarmConnectTimeout = 20 * time.Second
-const swarmRequestTimeout = 20 * time.Second
-const stateFile = "docker-state.json"
-const defaultAddr = "0.0.0.0:2377"
-
 const (
+	swarmDirName                   = "swarm"
+	controlSocket                  = "control.sock"
+	swarmConnectTimeout            = 20 * time.Second
+	swarmRequestTimeout            = 20 * time.Second
+	stateFile                      = "docker-state.json"
+	defaultAddr                    = "0.0.0.0:2377"
+	isWindows                      = runtime.GOOS == "windows"
 	initialReconnectDelay          = 100 * time.Millisecond
 	maxReconnectDelay              = 30 * time.Second
 	contextPrefix                  = "com.docker.swarm"
@@ -402,7 +404,10 @@ func (c *Cluster) Cleanup() {
 func managerStats(client swarmapi.ControlClient, currentNodeID string) (current bool, reachable int, unreachable int, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	nodes, err := client.ListNodes(ctx, &swarmapi.ListNodesRequest{})
+	nodes, err := client.ListNodes(
+		ctx, &swarmapi.ListNodesRequest{},
+		grpc.MaxCallRecvMsgSize(defaultRecvSizeForListResponse),
+	)
 	if err != nil {
 		return false, 0, 0, err
 	}

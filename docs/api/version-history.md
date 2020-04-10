@@ -17,6 +17,13 @@ keywords: "API, Docker, rcli, REST, documentation"
 
 [Docker Engine API v1.41](https://docs.docker.com/engine/api/v1.41/) documentation
 
+* `POST /services/create` and `POST /services/{id}/update` now supports `BindOptions.NonRecursive`.
+* The `ClusterStore` and `ClusterAdvertise` fields in `GET /info` are deprecated
+  and are now omitted if they contain an empty value. This change is not versioned,
+  and affects all API versions if the daemon has this patch.
+* The `filter` (singular) query parameter, which was deprecated in favor of the
+  `filters` option in Docker 1.13, has now been removed from the `GET /images/json`
+  endpoint. The parameter remains available when using API version 1.40 or below.
 * `GET /services` now returns `Capabilities` as part of the `ContainerSpec`.
 * `GET /services/{id}` now returns `Capabilities` as part of the `ContainerSpec`.
 * `POST /services/create` now accepts `Capabilities` as part of the `ContainerSpec`.
@@ -28,6 +35,32 @@ keywords: "API, Docker, rcli, REST, documentation"
   `private` to create the container in its own private cgroup namespace.  The per-daemon
   default is `host`, and can be changed by using the`CgroupNamespaceMode` daemon configuration
   parameter.
+* `GET /info` now  returns an `OSVersion` field, containing the operating system's
+  version. This change is not versioned, and affects all API versions if the daemon
+  has this patch.
+* `GET /info` no longer returns the `SystemStatus` field if it does not have a
+  value set. This change is not versioned, and affects all API versions if the
+  daemon has this patch.
+* `GET /services` now accepts query parameter `status`. When set `true`,
+  services returned will include `ServiceStatus`, which provides Desired,
+  Running, and Completed task counts for the service.
+* `GET /services` may now include `ReplicatedJob` or `GlobalJob` as the `Mode`
+  in a `ServiceSpec`.
+* `GET /services/{id}` may now include `ReplicatedJob` or `GlobalJob` as the
+  `Mode` in a `ServiceSpec`.
+* `POST /services/create` now accepts `ReplicatedJob or `GlobalJob` as the `Mode`
+  in the `ServiceSpec.
+* `POST /services/{id}/update` accepts updating the fields of the
+  `ReplicatedJob` object in the `ServiceSpec.Mode`. The service mode still
+  cannot be changed, however.
+* `GET /services` now includes `JobStatus` on Services with mode
+  `ReplicatedJob` or `GlobalJob`.
+* `GET /services/{id}` now includes `JobStatus` on Services with mode
+  `ReplicatedJob` or `GlobalJob`.
+* `GET /tasks` now includes `JobIteration` on Tasks spawned from a job-mode
+  service.
+* `GET /tasks/{id}` now includes `JobIteration` on the task if spawned from a
+  job-mode service.
 
 ## v1.40 API changes
 
@@ -59,6 +92,17 @@ keywords: "API, Docker, rcli, REST, documentation"
   on the node.label. The format of the label filter is `node.label=<key>`/`node.label=<key>=<value>`
   to return those with the specified labels, or `node.label!=<key>`/`node.label!=<key>=<value>`
   to return those without the specified labels.
+* `POST /containers/create` now accepts a `fluentd-async` option in `HostConfig.LogConfig.Config`
+  when using the Fluentd logging driver. This option deprecates the `fluentd-async-connect`
+  option, which remains funtional, but will be removed in a future release. Users
+  are encouraged to use the `fluentd-async` option going forward. This change is
+  not versioned, and affects all API versions if the daemon has this patch.
+* `POST /containers/create` now accepts a `fluentd-request-ack` option in
+  `HostConfig.LogConfig.Config` when using the Fluentd logging driver. If enabled,
+  the Fluentd logging driver sends the chunk option with a unique ID. The server
+  will respond with an acknowledgement. This option improves the reliability of
+  the message transmission. This change is not versioned, and affects all API
+  versions if the daemon has this patch.
 * `POST /containers/create`, `GET /containers/{id}/json`, and `GET /containers/json` now supports
   `BindOptions.NonRecursive`.
 * `POST /swarm/init` now accepts a `DataPathPort` property to set data path port number.
@@ -103,6 +147,9 @@ keywords: "API, Docker, rcli, REST, documentation"
 * `POST /swarm/init` now accepts a `DefaultAddrPool` property to set global scope default address pool
 * `POST /swarm/init` now accepts a `SubnetSize` property to set global scope networks by giving the
   length of the subnet masks for every such network
+* `POST /session` (added in [V1.31](#v131-api-changes) is no longer experimental.
+  This endpoint can be used to run interactive long-running protocols between the
+  client and the daemon.
 
 ## V1.38 API changes
 
@@ -260,7 +307,7 @@ keywords: "API, Docker, rcli, REST, documentation"
 * `GET /containers/create` now takes a `DeviceCgroupRules` field in `HostConfig` allowing to set custom device cgroup rules for the created container.
 * Optional query parameter `verbose` for `GET /networks/(id or name)` will now list all services with all the tasks, including the non-local tasks on the given network.
 * `GET /containers/(id or name)/attach/ws` now returns WebSocket in binary frame format for API version >= v1.28, and returns WebSocket in text frame format for API version< v1.28, for the purpose of backward-compatibility.
-* `GET /networks` is optimised only to return list of all networks and network specific information. List of all containers attached to a specific network is removed from this API and is only available using the network specific `GET /networks/{network-id}.
+* `GET /networks` is optimised only to return list of all networks and network specific information. List of all containers attached to a specific network is removed from this API and is only available using the network specific `GET /networks/{network-id}`.
 * `GET /containers/json` now supports `publish` and `expose` filters to filter containers that expose or publish certain ports.
 * `POST /services/create` and `POST /services/(id or name)/update` now accept the `ReadOnly` parameter, which mounts the container's root filesystem as read only.
 * `POST /build` now accepts `extrahosts` parameter to specify a host to ip mapping to use during the build.
@@ -328,6 +375,9 @@ keywords: "API, Docker, rcli, REST, documentation"
 * The `HostConfig` field now includes `CpuCount` that represents the number of CPUs available for execution by the container. Windows daemon only.
 * `POST /services/create` and `POST /services/(id or name)/update` now accept the `TTY` parameter, which allocate a pseudo-TTY in container.
 * `POST /services/create` and `POST /services/(id or name)/update` now accept the `DNSConfig` parameter, which specifies DNS related configurations in resolver configuration file (resolv.conf) through `Nameservers`, `Search`, and `Options`.
+* `POST /services/create` and `POST /services/(id or name)/update` now support
+  `node.platform.arch` and `node.platform.os` constraints in the services 
+  `TaskSpec.Placement.Constraints` field.
 * `GET /networks/(id or name)` now includes IP and name of all peers nodes for swarm mode overlay networks.
 * `GET /plugins` list plugins.
 * `POST /plugins/pull?name=<plugin name>` pulls a plugin.

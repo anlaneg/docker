@@ -9,10 +9,10 @@ import (
 	"testing"
 
 	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/internal/test/daemon"
-	"github.com/docker/docker/internal/testutil"
-	"gotest.tools/assert"
-	"gotest.tools/skip"
+	"github.com/docker/docker/testutil"
+	"github.com/docker/docker/testutil/daemon"
+	"gotest.tools/v3/assert"
+	"gotest.tools/v3/skip"
 )
 
 // Ensure we don't regress on CVE-2017-14992.

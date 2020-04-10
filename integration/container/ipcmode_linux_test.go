@@ -14,12 +14,12 @@ import (
 	"github.com/docker/docker/api/types/versions"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
-	"github.com/docker/docker/internal/test/daemon"
-	"github.com/docker/docker/internal/test/request"
-	"gotest.tools/assert"
-	is "gotest.tools/assert/cmp"
-	"gotest.tools/fs"
-	"gotest.tools/skip"
+	"github.com/docker/docker/testutil/daemon"
+	"github.com/docker/docker/testutil/request"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
+	"gotest.tools/v3/fs"
+	"gotest.tools/v3/skip"
 )
 
 // testIpcCheckDevExists checks whether a given mount (identified by its
@@ -116,6 +116,7 @@ func TestIpcModePrivate(t *testing.T) {
 // also exists on the host.
 func TestIpcModeShareable(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
+	skip.If(t, testEnv.IsRootless, "cannot test /dev/shm in rootless")
 
 	testIpcNonePrivateShareable(t, "shareable", true, true)
 }
@@ -191,6 +192,7 @@ func TestAPIIpcModeShareableAndContainer(t *testing.T) {
 func TestAPIIpcModeHost(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.IsUserNamespace)
+	skip.If(t, testEnv.IsRootless, "cannot test /dev/shm in rootless")
 
 	cfg := containertypes.Config{
 		Image: "busybox",
@@ -262,6 +264,7 @@ func testDaemonIpcPrivateShareable(t *testing.T, mustBeShared bool, arg ...strin
 // TestDaemonIpcModeShareable checks that --default-ipc-mode shareable works as intended.
 func TestDaemonIpcModeShareable(t *testing.T) {
 	skip.If(t, testEnv.IsRemoteDaemon)
+	skip.If(t, testEnv.IsRootless, "cannot test /dev/shm in rootless")
 
 	testDaemonIpcPrivateShareable(t, true, "--default-ipc-mode", "shareable")
 }
@@ -275,6 +278,7 @@ func TestDaemonIpcModePrivate(t *testing.T) {
 
 // used to check if an IpcMode given in config works as intended
 func testDaemonIpcFromConfig(t *testing.T, mode string, mustExist bool) {
+	skip.If(t, testEnv.IsRootless, "cannot test /dev/shm in rootless")
 	config := `{"default-ipc-mode": "` + mode + `"}`
 	file := fs.NewFile(t, "test-daemon-ipc-config", fs.WithContent(config))
 	defer file.Remove()

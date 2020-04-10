@@ -1,10 +1,7 @@
 #!/bin/sh
 # dockerd-rootless.sh executes dockerd in rootless mode.
 #
-# Usage: dockerd-rootless.sh --experimental [DOCKERD_OPTIONS]
-# Currently, specifying --experimental is mandatory.
-# Also, to expose ports, you need to specify
-# --userland-proxy-path=/path/to/rootlesskit-docker-proxy
+# Usage: dockerd-rootless.sh [DOCKERD_OPTIONS]
 #
 # External dependencies:
 # * newuidmap and newgidmap needs to be installed.
@@ -13,7 +10,7 @@
 #   slirp4netns is used by default if installed. Otherwise fallsback to VPNKit.
 #   The default value can be overridden with $DOCKERD_ROOTLESS_ROOTLESSKIT_NET=(slirp4netns|vpnkit|lxc-user-nic)
 #
-# See the documentation for the further information.
+# See the documentation for the further information: https://docs.docker.com/engine/security/rootless/
 
 set -e -x
 if ! [ -w $XDG_RUNTIME_DIR ]; then
@@ -27,7 +24,7 @@ fi
 
 rootlesskit=""
 for f in docker-rootlesskit rootlesskit; do
-	if which $f >/dev/null 2>&1; then
+	if which $f > /dev/null 2>&1; then
 		rootlesskit=$f
 		break
 	fi
@@ -39,10 +36,13 @@ fi
 
 : "${DOCKERD_ROOTLESS_ROOTLESSKIT_NET:=}"
 : "${DOCKERD_ROOTLESS_ROOTLESSKIT_MTU:=}"
+# if slirp4netns v0.4.0+ is installed, slirp4netns is hardened using sandbox (mount namespace) and seccomp
+: "${DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX:=auto}"
+: "${DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP:=auto}"
 net=$DOCKERD_ROOTLESS_ROOTLESSKIT_NET
 mtu=$DOCKERD_ROOTLESS_ROOTLESSKIT_MTU
 if [ -z $net ]; then
-	if which slirp4netns >/dev/null 2>&1; then
+	if which slirp4netns > /dev/null 2>&1; then
 		if slirp4netns --help | grep -- --disable-host-loopback; then
 			net=slirp4netns
 			if [ -z $mtu ]; then
@@ -53,7 +53,7 @@ if [ -z $net ]; then
 		fi
 	fi
 	if [ -z $net ]; then
-		if which vpnkit >/dev/null 2>&1; then
+		if which vpnkit > /dev/null 2>&1; then
 			net=vpnkit
 		else
 			echo "Either slirp4netns (v0.3+) or vpnkit needs to be installed"
@@ -77,8 +77,11 @@ if [ -z $_DOCKERD_ROOTLESS_CHILD ]; then
 	# * /run: copy-up is required so that we can create /run/docker (hardcoded for plugins) in our namespace
 	exec $rootlesskit \
 		--net=$net --mtu=$mtu \
+		--slirp4netns-sandbox=$DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX \
+		--slirp4netns-seccomp=$DOCKERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP \
 		--disable-host-loopback --port-driver=builtin \
 		--copy-up=/etc --copy-up=/run \
+		--propagation=rslave \
 		$DOCKERD_ROOTLESS_ROOTLESSKIT_FLAGS \
 		$0 $@
 else

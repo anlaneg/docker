@@ -7,7 +7,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/pkg/mount"
+	"github.com/moby/sys/mount"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
 )
@@ -51,7 +51,7 @@ func Unmount(target string) error {
 			continue // try again
 		default:
 			// any other error is fatal
-			break
+			return err
 		}
 	}
 

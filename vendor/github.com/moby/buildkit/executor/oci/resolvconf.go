@@ -8,6 +8,7 @@ import (
 
 	"github.com/docker/docker/pkg/idtools"
 	"github.com/docker/libnetwork/resolvconf"
+	"github.com/docker/libnetwork/types"
 	"github.com/moby/buildkit/util/flightcontrol"
 )
 
@@ -15,7 +16,16 @@ var g flightcontrol.Group
 var notFirstRun bool
 var lastNotEmpty bool
 
-func GetResolvConf(ctx context.Context, stateDir string, idmap *idtools.IdentityMapping) (string, error) {
+// overridden by tests
+var resolvconfGet = resolvconf.Get
+
+type DNSConfig struct {
+	Nameservers   []string
+	Options       []string
+	SearchDomains []string
+}
+
+func GetResolvConf(ctx context.Context, stateDir string, idmap *idtools.IdentityMapping, dns *DNSConfig) (string, error) {
 	p := filepath.Join(stateDir, "resolv.conf")
 	_, err := g.Do(ctx, stateDir, func(ctx context.Context) (interface{}, error) {
 		generate := !notFirstRun
@@ -52,12 +62,35 @@ func GetResolvConf(ctx context.Context, stateDir string, idmap *idtools.Identity
 		}
 
 		var dt []byte
-		f, err := resolvconf.Get()
+		f, err := resolvconfGet()
 		if err != nil {
 			if !os.IsNotExist(err) {
 				return "", err
 			}
 		} else {
+			dt = f.Content
+		}
+
+		if dns != nil {
+			var (
+				dnsNameservers   = resolvconf.GetNameservers(dt, types.IP)
+				dnsSearchDomains = resolvconf.GetSearchDomains(dt)
+				dnsOptions       = resolvconf.GetOptions(dt)
+			)
+			if len(dns.Nameservers) > 0 {
+				dnsNameservers = dns.Nameservers
+			}
+			if len(dns.SearchDomains) > 0 {
+				dnsSearchDomains = dns.SearchDomains
+			}
+			if len(dns.Options) > 0 {
+				dnsOptions = dns.Options
+			}
+
+			f, err = resolvconf.Build(p+".tmp", dnsNameservers, dnsSearchDomains, dnsOptions)
+			if err != nil {
+				return "", err
+			}
 			dt = f.Content
 		}
 

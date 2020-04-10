@@ -12,7 +12,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/libcontainerd"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
-	"github.com/opencontainers/runtime-spec/specs-go"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -26,13 +26,13 @@ type ExitHandler interface {
 }
 
 // New creates a new containerd plugin executor
-func New(ctx context.Context, rootDir string, cli *containerd.Client, exitHandler ExitHandler) (*Executor, error) {
+func New(ctx context.Context, rootDir string, cli *containerd.Client, ns string, exitHandler ExitHandler, useShimV2 bool) (*Executor, error) {
 	e := &Executor{
 		rootDir:     rootDir,
 		exitHandler: exitHandler,
 	}
 
-	client, err := libcontainerd.NewClient(ctx, cli, rootDir, PluginNamespace, e)
+	client, err := libcontainerd.NewClient(ctx, cli, rootDir, ns, e, useShimV2)
 	if err != nil {
 		return nil, errors.Wrap(err, "error creating containerd exec client")
 	}

@@ -2,9 +2,6 @@ package daemon // import "github.com/docker/docker/daemon"
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"runtime"
 	"strconv"
 	"time"
 
@@ -12,6 +9,7 @@ import (
 	"github.com/docker/docker/container"
 	libcontainerdtypes "github.com/docker/docker/libcontainerd/types"
 	"github.com/docker/docker/restartmanager"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
@@ -29,14 +27,14 @@ func (daemon *Daemon) setStateCounter(c *container.Container) {
 // ProcessEvent is called by libcontainerd whenever an event occurs
 func (daemon *Daemon) ProcessEvent(id string, e libcontainerdtypes.EventType, ei libcontainerdtypes.EventInfo) error {
 	c, err := daemon.GetContainer(id)
-	if c == nil || err != nil {
-		return fmt.Errorf("no such container: %s", id)
+	if err != nil {
+		return errors.Wrapf(err, "could not find container %s", id)
 	}
 
 	switch e {
 	case libcontainerdtypes.EventOOM:
 		// StateOOM is Linux specific and should never be hit on Windows
-		if runtime.GOOS == "windows" {
+		if isWindows {
 			return errors.New("received StateOOM from libcontainerd on Windows. This should never happen")
 		}
 
@@ -55,8 +53,9 @@ func (daemon *Daemon) ProcessEvent(id string, e libcontainerdtypes.EventType, ei
 			if err != nil {
 				logrus.WithError(err).Warnf("failed to delete container %s from containerd", c.ID)
 			}
-
-			c.StreamConfig.Wait()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			c.StreamConfig.Wait(ctx)
+			cancel()
 			c.Reset(false)
 
 			exitStatus := container.ExitStatus{
@@ -117,13 +116,18 @@ func (daemon *Daemon) ProcessEvent(id string, e libcontainerdtypes.EventType, ei
 			return cpErr
 		}
 
+		exitCode := 127
 		if execConfig := c.ExecCommands.Get(ei.ProcessID); execConfig != nil {
 			ec := int(ei.ExitCode)
 			execConfig.Lock()
 			defer execConfig.Unlock()
 			execConfig.ExitCode = &ec
 			execConfig.Running = false
-			execConfig.StreamConfig.Wait()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			execConfig.StreamConfig.Wait(ctx)
+			cancel()
+
 			if err := execConfig.CloseStreams(); err != nil {
 				logrus.Errorf("failed to cleanup exec %s streams: %s", c.ID, err)
 			}
@@ -131,18 +135,14 @@ func (daemon *Daemon) ProcessEvent(id string, e libcontainerdtypes.EventType, ei
 			// remove the exec command from the container's store only and not the
 			// daemon's store so that the exec command can be inspected.
 			c.ExecCommands.Delete(execConfig.ID, execConfig.Pid)
-			attributes := map[string]string{
-				"execID":   execConfig.ID,
-				"exitCode": strconv.Itoa(ec),
-			}
-			daemon.LogContainerEventWithAttributes(c, "exec_die", attributes)
-		} else {
-			logrus.WithFields(logrus.Fields{
-				"container": c.ID,
-				"exec-id":   ei.ProcessID,
-				"exec-pid":  ei.Pid,
-			}).Warn("Ignoring Exit Event, no such exec command found")
+
+			exitCode = ec
 		}
+		attributes := map[string]string{
+			"execID":   ei.ProcessID,
+			"exitCode": strconv.Itoa(exitCode),
+		}
+		daemon.LogContainerEventWithAttributes(c, "exec_die", attributes)
 	case libcontainerdtypes.EventStart:
 		c.Lock()
 		defer c.Unlock()
@@ -201,15 +201,13 @@ func (daemon *Daemon) autoRemove(c *container.Container) {
 		return
 	}
 
-	var err error
-	if err = daemon.ContainerRm(c.ID, &types.ContainerRmConfig{ForceRemove: true, RemoveVolume: true}); err == nil {
+	err := daemon.ContainerRm(c.ID, &types.ContainerRmConfig{ForceRemove: true, RemoveVolume: true})
+	if err == nil {
 		return
 	}
 	if c := daemon.containers.Get(c.ID); c == nil {
 		return
 	}
 
-	if err != nil {
-		logrus.WithError(err).WithField("container", c.ID).Error("error removing container")
-	}
+	logrus.WithError(err).WithField("container", c.ID).Error("error removing container")
 }

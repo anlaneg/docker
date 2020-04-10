@@ -20,13 +20,12 @@ import (
 	"github.com/docker/docker/pkg/sysinfo"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/registry"
-	"github.com/docker/go-connections/sockets"
-	"github.com/docker/go-metrics"
+	metrics "github.com/docker/go-metrics"
 	"github.com/sirupsen/logrus"
 )
 
 // SystemInfo returns information about the host server the daemon is running on.
-func (daemon *Daemon) SystemInfo() (*types.Info, error) {
+func (daemon *Daemon) SystemInfo() *types.Info {
 	defer metrics.StartTimer(hostInfoFunctions.WithValues("system_info"))()
 
 	sysInfo := sysinfo.New(true)
@@ -64,15 +63,14 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 		Labels:             daemon.configStore.Labels,
 		ExperimentalBuild:  daemon.configStore.Experimental,
 		ServerVersion:      dockerversion.Version,
-		ClusterStore:       daemon.configStore.ClusterStore,
-		ClusterAdvertise:   daemon.configStore.ClusterAdvertise,
-		HTTPProxy:          maskCredentials(sockets.GetProxyEnv("http_proxy")),
-		HTTPSProxy:         maskCredentials(sockets.GetProxyEnv("https_proxy")),
-		NoProxy:            sockets.GetProxyEnv("no_proxy"),
+		HTTPProxy:          maskCredentials(getEnvAny("HTTP_PROXY", "http_proxy")),
+		HTTPSProxy:         maskCredentials(getEnvAny("HTTPS_PROXY", "https_proxy")),
+		NoProxy:            getEnvAny("NO_PROXY", "no_proxy"),
 		LiveRestoreEnabled: daemon.configStore.LiveRestoreEnabled,
 		Isolation:          daemon.defaultIsolation,
 	}
 
+	daemon.fillClusterInfo(v)
 	daemon.fillAPIInfo(v)
 	// Retrieve platform specific info
 	daemon.fillPlatformInfo(v, sysInfo)
@@ -81,7 +79,7 @@ func (daemon *Daemon) SystemInfo() (*types.Info, error) {
 	daemon.fillSecurityOptions(v, sysInfo)
 	daemon.fillLicense(v)
 
-	return v, nil
+	return v
 }
 
 // SystemVersion returns version information about the daemon.
@@ -126,6 +124,16 @@ func (daemon *Daemon) SystemVersion() types.Version {
 
 	daemon.fillPlatformVersion(&v)
 	return v
+}
+
+func (daemon *Daemon) fillClusterInfo(v *types.Info) {
+	v.ClusterAdvertise = daemon.configStore.ClusterAdvertise
+	v.ClusterStore = daemon.configStore.ClusterStore
+
+	if v.ClusterAdvertise != "" || v.ClusterStore != "" {
+		v.Warnings = append(v.Warnings, `WARNING: node discovery and overlay networks with an external k/v store (cluster-advertise,
+         cluster-store, cluster-store-opt) are deprecated and will be removed in a future release.`)
+	}
 }
 
 func (daemon *Daemon) fillDriverInfo(v *types.Info) {
@@ -286,4 +294,13 @@ func maskCredentials(rawURL string) string {
 	parsedURL.User = url.UserPassword("xxxxx", "xxxxx")
 	maskedURL := parsedURL.String()
 	return maskedURL
+}
+
+func getEnvAny(names ...string) string {
+	for _, n := range names {
+		if val := os.Getenv(n); val != "" {
+			return val
+		}
+	}
+	return ""
 }

@@ -26,11 +26,12 @@ import (
 )
 
 type clientOpts struct {
-	defaultns      string
-	defaultRuntime string
-	services       *services
-	dialOptions    []grpc.DialOption
-	timeout        time.Duration
+	defaultns       string
+	defaultRuntime  string
+	defaultPlatform platforms.MatchComparer
+	services        *services
+	dialOptions     []grpc.DialOption
+	timeout         time.Duration
 }
 
 // ClientOpt allows callers to set options on the containerd client
@@ -51,6 +52,14 @@ func WithDefaultNamespace(ns string) ClientOpt {
 func WithDefaultRuntime(rt string) ClientOpt {
 	return func(c *clientOpts) error {
 		c.defaultRuntime = rt
+		return nil
+	}
+}
+
+// WithDefaultPlatform sets the default platform matcher on the client
+func WithDefaultPlatform(platform platforms.MatchComparer) ClientOpt {
+	return func(c *clientOpts) error {
+		c.defaultPlatform = platform
 		return nil
 	}
 }
@@ -119,6 +128,14 @@ func WithPlatformMatcher(m platforms.MatchComparer) RemoteOpt {
 func WithPullUnpack(_ *Client, c *RemoteContext) error {
 	c.Unpack = true
 	return nil
+}
+
+// WithUnpackOpts is used to add unpack options to the unpacker.
+func WithUnpackOpts(opts []UnpackOpt) RemoteOpt {
+	return func(_ *Client, c *RemoteContext) error {
+		c.UnpackOpts = append(c.UnpackOpts, opts...)
+		return nil
+	}
 }
 
 // WithPullSnapshotter specifies snapshotter name used for unpacking
@@ -195,11 +212,10 @@ func WithMaxConcurrentDownloads(max int) RemoteOpt {
 	}
 }
 
-// WithAppendDistributionSourceLabel allows fetcher to add distribute source
-// label for each blob content, which doesn't work for legacy schema1.
-func WithAppendDistributionSourceLabel() RemoteOpt {
+// WithAllMetadata downloads all manifests and known-configuration files
+func WithAllMetadata() RemoteOpt {
 	return func(_ *Client, c *RemoteContext) error {
-		c.AppendDistributionSourceLabel = true
+		c.AllMetadata = true
 		return nil
 	}
 }

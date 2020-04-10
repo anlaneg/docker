@@ -10,17 +10,17 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	swarmtypes "github.com/docker/docker/api/types/swarm"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/internal/test/daemon"
-	"github.com/docker/docker/internal/test/environment"
-	"gotest.tools/assert"
-	"gotest.tools/poll"
-	"gotest.tools/skip"
+	"github.com/docker/docker/testutil/daemon"
+	"github.com/docker/docker/testutil/environment"
+	"gotest.tools/v3/assert"
+	"gotest.tools/v3/poll"
+	"gotest.tools/v3/skip"
 )
 
 // ServicePoll tweaks the pollSettings for `service`
 func ServicePoll(config *poll.Settings) {
 	// Override the default pollSettings for `service` resource here ...
-	config.Timeout = 30 * time.Second
+	config.Timeout = 15 * time.Second
 	config.Delay = 100 * time.Millisecond
 	if runtime.GOARCH == "arm64" || runtime.GOARCH == "arm" {
 		config.Timeout = 90 * time.Second
@@ -49,12 +49,13 @@ func ContainerPoll(config *poll.Settings) {
 }
 
 // NewSwarm creates a swarm daemon for testing
-func NewSwarm(t *testing.T, testEnv *environment.Execution, ops ...func(*daemon.Daemon)) *daemon.Daemon {
+func NewSwarm(t *testing.T, testEnv *environment.Execution, ops ...daemon.Option) *daemon.Daemon {
 	t.Helper()
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
+	skip.If(t, testEnv.IsRootless, "rootless mode doesn't support Swarm-mode")
 	if testEnv.DaemonInfo.ExperimentalBuild {
-		ops = append(ops, daemon.WithExperimental)
+		ops = append(ops, daemon.WithExperimental())
 	}
 	d := daemon.New(t, ops...)
 	d.StartAndSwarmInit(t)
@@ -89,6 +90,13 @@ func CreateServiceSpec(t *testing.T, opts ...ServiceSpecOpt) swarmtypes.ServiceS
 		o(&spec)
 	}
 	return spec
+}
+
+// ServiceWithMode sets the mode of the service to the provided mode.
+func ServiceWithMode(mode swarmtypes.ServiceMode) func(*swarmtypes.ServiceSpec) {
+	return func(spec *swarmtypes.ServiceSpec) {
+		spec.Mode = mode
+	}
 }
 
 // ServiceWithInit sets whether the service should use init or not

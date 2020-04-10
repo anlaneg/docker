@@ -1,6 +1,6 @@
 // +build !windows
 
-package ipvlan
+package ipvlan // import "github.com/docker/docker/integration/network/ipvlan"
 
 import (
 	"context"
@@ -9,24 +9,22 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	dclient "github.com/docker/docker/client"
 	"github.com/docker/docker/integration/internal/container"
 	net "github.com/docker/docker/integration/internal/network"
 	n "github.com/docker/docker/integration/network"
-	"github.com/docker/docker/internal/test/daemon"
-	"gotest.tools/assert"
-	"gotest.tools/skip"
+	"github.com/docker/docker/testutil/daemon"
+	"gotest.tools/v3/assert"
+	"gotest.tools/v3/skip"
 )
 
 func TestDockerNetworkIpvlanPersistance(t *testing.T) {
 	// verify the driver automatically provisions the 802.1q link (di-dummy0.70)
-	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, !ipvlanKernelSupport(t), "Kernel doesn't support ipvlan")
 
-	d := daemon.New(t, daemon.WithExperimental)
+	d := daemon.New(t)
 	d.StartWithBusybox(t)
 	defer d.Stop(t)
 
@@ -50,7 +48,6 @@ func TestDockerNetworkIpvlanPersistance(t *testing.T) {
 }
 
 func TestDockerNetworkIpvlan(t *testing.T) {
-	skip.If(t, testEnv.DaemonInfo.OSType == "windows")
 	skip.If(t, testEnv.IsRemoteDaemon)
 	skip.If(t, !ipvlanKernelSupport(t), "Kernel doesn't support ipvlan")
 
@@ -87,7 +84,7 @@ func TestDockerNetworkIpvlan(t *testing.T) {
 			test: testIpvlanAddressing,
 		},
 	} {
-		d := daemon.New(t, daemon.WithExperimental)
+		d := daemon.New(t)
 		d.StartWithBusybox(t)
 		c := d.NewClientT(t)
 
@@ -174,14 +171,10 @@ func testIpvlanL2InternalMode(client dclient.APIClient) func(*testing.T) {
 		id1 := container.Run(ctx, t, client, container.WithNetworkMode(netName))
 		id2 := container.Run(ctx, t, client, container.WithNetworkMode(netName))
 
-		timeoutCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancel()
-		_, err := container.Exec(timeoutCtx, client, id1, []string{"ping", "-c", "1", "-w", "1", "8.8.8.8"})
-		// FIXME(vdemeester) check the time of error ?
-		assert.Check(t, err != nil)
-		assert.Check(t, timeoutCtx.Err() == context.DeadlineExceeded)
+		result, _ := container.Exec(ctx, client, id1, []string{"ping", "-c", "1", "8.8.8.8"})
+		assert.Check(t, strings.Contains(result.Combined(), "Network is unreachable"))
 
-		_, err = container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
+		_, err := container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
 		assert.NilError(t, err)
 	}
 }
@@ -232,14 +225,10 @@ func testIpvlanL3InternalMode(client dclient.APIClient) func(*testing.T) {
 			container.WithIPv4(netName, "172.28.230.10"),
 		)
 
-		timeoutCtx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancel()
-		_, err := container.Exec(timeoutCtx, client, id1, []string{"ping", "-c", "1", "-w", "1", "8.8.8.8"})
-		// FIXME(vdemeester) check the time of error ?
-		assert.Check(t, err != nil)
-		assert.Check(t, timeoutCtx.Err() == context.DeadlineExceeded)
+		result, _ := container.Exec(ctx, client, id1, []string{"ping", "-c", "1", "8.8.8.8"})
+		assert.Check(t, strings.Contains(result.Combined(), "Network is unreachable"))
 
-		_, err = container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
+		_, err := container.Exec(ctx, client, id2, []string{"ping", "-c", "1", id1})
 		assert.NilError(t, err)
 	}
 }

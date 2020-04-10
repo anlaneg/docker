@@ -8,8 +8,8 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/plugingetter"
 	"github.com/docker/docker/pkg/plugins"
-	"github.com/docker/docker/plugin/v2"
-	"github.com/opencontainers/runtime-spec/specs-go"
+	v2 "github.com/docker/docker/plugin/v2"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
@@ -188,9 +188,7 @@ func (ps *Store) GetAllByCap(capability string) ([]plugingetter.CompatPlugin, er
 	 * bypassing the daemon. For such tests, this check is necessary.
 	 */
 	if ps != nil {
-		ps.RLock()
 		result = ps.getAllByCap(capability)
-		ps.RUnlock()
 	}
 
 	// Lookup with legacy model

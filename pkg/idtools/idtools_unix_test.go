@@ -11,9 +11,9 @@ import (
 	"testing"
 
 	"golang.org/x/sys/unix"
-	"gotest.tools/assert"
-	is "gotest.tools/assert/cmp"
-	"gotest.tools/skip"
+	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
+	"gotest.tools/v3/skip"
 )
 
 const (
@@ -323,7 +323,7 @@ func TestNewIDMappings(t *testing.T) {
 
 	gids, err := tempUser.GroupIds()
 	assert.Check(t, err)
-	group, err := user.LookupGroupId(string(gids[0]))
+	group, err := user.LookupGroupId(gids[0])
 	assert.Check(t, err)
 
 	idMapping, err := NewIdentityMapping(tempUser.Username, group.Name)

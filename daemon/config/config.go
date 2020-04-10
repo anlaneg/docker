@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"reflect"
 	"strings"
@@ -31,6 +32,10 @@ const (
 	// maximum number of uploads that
 	// may take place at a time for each push.
 	DefaultMaxConcurrentUploads = 5
+	// DefaultDownloadAttempts is the default value for
+	// maximum number of attempts that
+	// may take place at a time for each pull when the connection is lost.
+	DefaultDownloadAttempts = 5
 	// StockRuntimeName is the reserved name/alias used to represent the
 	// OCI runtime being shipped with the docker daemon package.
 	StockRuntimeName = "runc"
@@ -109,6 +114,14 @@ type CommonTLSOptions struct {
 	KeyFile  string `json:"tlskey,omitempty"`
 }
 
+// DNSConfig defines the DNS configurations.
+type DNSConfig struct {
+	DNS           []string `json:"dns,omitempty"`
+	DNSOptions    []string `json:"dns-opts,omitempty"`
+	DNSSearch     []string `json:"dns-search,omitempty"`
+	HostGatewayIP net.IP   `json:"host-gateway-ip,omitempty"`
+}
+
 // CommonConfig defines the configuration of a docker daemon which is
 // common across platforms.
 // It includes json tags to deserialize configuration from a file
@@ -119,9 +132,6 @@ type CommonConfig struct {
 	AutoRestart           bool                      `json:"-"`
 	Context               map[string][]string       `json:"-"`
 	DisableBridge         bool                      `json:"-"`
-	DNS                   []string                  `json:"dns,omitempty"`
-	DNSOptions            []string                  `json:"dns-opts,omitempty"`
-	DNSSearch             []string                  `json:"dns-search,omitempty"`
 	ExecOptions           []string                  `json:"exec-opts,omitempty"`
 	GraphDriver           string                    `json:"storage-driver,omitempty"`
 	GraphOptions          []string                  `json:"storage-opts,omitempty"`
@@ -149,15 +159,18 @@ type CommonConfig struct {
 	// ClusterStore is the storage backend used for the cluster information. It is used by both
 	// multihost networking (to store networks and endpoints information) and by the node discovery
 	// mechanism.
+	// Deprecated: host-discovery and overlay networks with external k/v stores are deprecated
 	ClusterStore string `json:"cluster-store,omitempty"`
 
 	// ClusterOpts is used to pass options to the discovery package for tuning libkv settings, such
 	// as TLS configuration settings.
+	// Deprecated: host-discovery and overlay networks with external k/v stores are deprecated
 	ClusterOpts map[string]string `json:"cluster-store-opts,omitempty"`
 
 	// ClusterAdvertise is the network endpoint that the Engine advertises for the purpose of node
 	// discovery. This should be a 'host:port' combination on which that daemon instance is
 	// reachable by other hosts.
+	// Deprecated: host-discovery and overlay networks with external k/v stores are deprecated
 	ClusterAdvertise string `json:"cluster-advertise,omitempty"`
 
 	// MaxConcurrentDownloads is the maximum number of downloads that
@@ -167,6 +180,10 @@ type CommonConfig struct {
 	// MaxConcurrentUploads is the maximum number of uploads that
 	// may take place at a time for each push.
 	MaxConcurrentUploads *int `json:"max-concurrent-uploads,omitempty"`
+
+	// MaxDownloadAttempts is the maximum number of attempts that
+	// may take place at a time for each push.
+	MaxDownloadAttempts *int `json:"max-download-attempts,omitempty"`
 
 	// ShutdownTimeout is the timeout value (in seconds) the daemon will wait for the container
 	// to stop when daemon is being shutdown
@@ -200,6 +217,7 @@ type CommonConfig struct {
 
 	MetricsAddress string `json:"metrics-addr"`
 
+	DNSConfig
 	LogConfig
 	BridgeConfig // bridgeConfig holds bridge network specific configuration.
 	NetworkConfig
@@ -230,6 +248,9 @@ type CommonConfig struct {
 	Features map[string]bool `json:"features,omitempty"`
 
 	Builder BuilderConfig `json:"builder,omitempty"`
+
+	ContainerdNamespace       string `json:"containerd-namespace,omitempty"`
+	ContainerdPluginNamespace string `json:"containerd-plugin-namespace,omitempty"`
 }
 
 // IsValueSet returns true if a configuration value
@@ -288,25 +309,6 @@ func GetConflictFreeLabels(labels []string) ([]string, error) {
 		newLabels = append(newLabels, fmt.Sprintf("%s=%s", k, v))
 	}
 	return newLabels, nil
-}
-
-// ValidateReservedNamespaceLabels errors if the reserved namespaces com.docker.*,
-// io.docker.*, org.dockerproject.* are used in a configured engine label.
-//
-// TODO: This is a separate function because we need to warn users first of the
-// deprecation.  When we return an error, this logic can be added to Validate
-// or GetConflictFreeLabels instead of being here.
-func ValidateReservedNamespaceLabels(labels []string) error {
-	for _, label := range labels {
-		lowered := strings.ToLower(label)
-		if strings.HasPrefix(lowered, "com.docker.") || strings.HasPrefix(lowered, "io.docker.") ||
-			strings.HasPrefix(lowered, "org.dockerproject.") {
-			return fmt.Errorf(
-				"label %s not allowed: the namespaces com.docker.*, io.docker.*, and org.dockerproject.* are reserved for Docker's internal use",
-				label)
-		}
-	}
-	return nil
 }
 
 // Reload reads the configuration in the host and reloads the daemon and server.
@@ -477,9 +479,7 @@ func findConfigurationConflicts(config map[string]interface{}, flags *pflag.Flag
 	if len(unknownKeys) > 0 {
 		unknownNamedConflicts := func(f *pflag.Flag) {
 			if namedOption, ok := f.Value.(opts.NamedOption); ok {
-				if _, valid := unknownKeys[namedOption.Name()]; valid {
-					delete(unknownKeys, namedOption.Name())
-				}
+				delete(unknownKeys, namedOption.Name())
 			}
 		}
 		flags.VisitAll(unknownNamedConflicts)
@@ -526,7 +526,7 @@ func findConfigurationConflicts(config map[string]interface{}, flags *pflag.Flag
 
 // Validate validates some specific configs.
 // such as config.DNS, config.Labels, config.DNSSearch,
-// as well as config.MaxConcurrentDownloads, config.MaxConcurrentUploads.
+// as well as config.MaxConcurrentDownloads, config.MaxConcurrentUploads and config.MaxDownloadAttempts.
 func Validate(config *Config) error {
 	// validate DNS
 	for _, dns := range config.DNS {
@@ -556,6 +556,9 @@ func Validate(config *Config) error {
 	if config.MaxConcurrentUploads != nil && *config.MaxConcurrentUploads < 0 {
 		return fmt.Errorf("invalid max concurrent uploads: %d", *config.MaxConcurrentUploads)
 	}
+	if err := ValidateMaxDownloadAttempts(config); err != nil {
+		return err
+	}
 
 	// validate that "default" runtime is not reset
 	if runtimes := config.GetAllRuntimes(); len(runtimes) > 0 {
@@ -577,6 +580,14 @@ func Validate(config *Config) error {
 
 	// validate platform-specific settings
 	return config.ValidatePlatformConfig()
+}
+
+// ValidateMaxDownloadAttempts validates if the max-download-attempts is within the valid range
+func ValidateMaxDownloadAttempts(config *Config) error {
+	if config.MaxDownloadAttempts != nil && *config.MaxDownloadAttempts <= 0 {
+		return fmt.Errorf("invalid max download attempts: %d", *config.MaxDownloadAttempts)
+	}
+	return nil
 }
 
 // ModifiedDiscoverySettings returns whether the discovery configuration has been modified or not.
